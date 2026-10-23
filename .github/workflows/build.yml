@@ -1,5 +1,5 @@
 
-name: Compilar APK Nexora 2.0
+name: Build Nexora APK
 
 on:
   workflow_dispatch:
@@ -12,84 +12,77 @@ permissions:
 
 jobs:
   build:
-    name: Construir APK Android
     runs-on: ubuntu-latest
-    timeout-minutes: 45
 
     steps:
-      # 1. Descargar el repositorio
-      - name: Descargar código fuente
+      - name: Descargar repositorio
         uses: actions/checkout@v4
 
-      # 2. Configurar Java
-      - name: Configurar Java 17
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
+      - name: Mostrar archivos del repositorio
+        shell: bash
+        run: |
+          set -e
+          echo "Directorio actual:"
+          pwd
+          echo "Archivos encontrados:"
+          find . -maxdepth 4 -type f \
+            -not -path './.git/*' | sort | head -n 300
 
-      # 3. Configurar Android SDK
-      - name: Configurar Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools
-
-      # 4. Aceptar licencias sin utilizar yes | sdkmanager
-      - name: Aceptar licencias Android
+      - name: Buscar y descomprimir ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+          mkdir -p "$RUNNER_TEMP/nexora_extraido"
 
-          if [ ! -x "$SDKMANAGER" ]; then
-            SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" \
-              -type f -name sdkmanager | sort -V | tail -n 1)
-          fi
+          ZIP_FILE="$(find "$GITHUB_WORKSPACE" \
+            -type f -iname '*.zip' \
+            -not -path '*/.git/*' \
+            -print -quit)"
 
-          if [ ! -x "$SDKMANAGER" ]; then
-            echo "::error::No se encontró sdkmanager."
+          if [ -z "$ZIP_FILE" ]; then
+            echo "::error::No se encontró ningún archivo ZIP en el repositorio."
+            echo "Sube el ZIP de Nexora a la rama main y vuelve a ejecutar."
             exit 1
           fi
 
-          # El proceso de setup-android normalmente gestiona
-          # las licencias necesarias. Este comando comprueba
-          # su estado sin crear una tubería que provoque Broken pipe.
-          if ! "$SDKMANAGER" --licenses < /dev/null; then
-            echo "::error::Hay licencias pendientes de aceptar."
-            echo "Revisa la configuración del Android SDK."
-            exit 1
-          fi
+          echo "ZIP encontrado: $ZIP_FILE"
 
-      # 5. Localizar el proyecto Android
+          unzip -t "$ZIP_FILE"
+
+          unzip -o "$ZIP_FILE" \
+            -d "$RUNNER_TEMP/nexora_extraido"
+
+          echo "Contenido descomprimido:"
+          find "$RUNNER_TEMP/nexora_extraido" \
+            -maxdepth 5 -type f | sort | head -n 300
+
       - name: Localizar proyecto Android
-        id: project
         shell: bash
         run: |
           set -euo pipefail
 
-          if [ -f "./gradlew" ]; then
-            PROJECT_DIR="."
-          else
-            GRADLEW=$(find . \
-              -type f \
-              -name gradlew \
-              -not -path "*/.gradle/*" \
-              -not -path "*/build/*" \
-              | head -n 1 || true)
+          ROOT="$RUNNER_TEMP/nexora_extraido"
 
-            if [ -z "$GRADLEW" ]; then
-              echo "::error::No se encontró gradlew."
-              echo "Sube el proyecto Android completo al repositorio."
-              exit 1
-            fi
+          SETTINGS="$(find "$ROOT" -type f \
+            \( -name settings.gradle \
+            -o -name settings.gradle.kts \) \
+            -print -quit)"
 
-            PROJECT_DIR=$(dirname "$GRADLEW")
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::El ZIP no contiene settings.gradle ni settings.gradle.kts."
+            echo "Comprueba que subiste el proyecto Android completo."
+            exit 1
           fi
 
-          if [ ! -f "$PROJECT_DIR/settings.gradle" ] && \
-             [ ! -f "$PROJECT_DIR/settings.gradle.kts" ]; then
-            echo "::error::Falta settings.gradle o settings.gradle.kts."
+          PROJECT_DIR="$(dirname "$SETTINGS")"
+
+          echo "Proyecto Android: $PROJECT_DIR"
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          if [ ! -f "$PROJECT_DIR/gradlew" ]; then
+            echo "::error::El proyecto no contiene gradlew."
+            echo "El ZIP debe incluir el Gradle Wrapper."
             exit 1
           fi
 
@@ -98,54 +91,38 @@ jobs:
             exit 1
           fi
 
-          echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
-          echo "Proyecto localizado en: $PROJECT_DIR"
-
-      # 6. Configurar Gradle
-      - name: Configurar Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      # 7. Preparar Gradle Wrapper
-      - name: Preparar compilador Gradle
-        working-directory: ${{ steps.project.outputs.dir }}
-        shell: bash
-        run: chmod +x ./gradlew
-
-      # 8. Compilar APK
-      - name: Compilar Nexora Debug
-        working-directory: ${{ steps.project.outputs.dir }}
-        shell: bash
-        run: |
-          set -o pipefail
-          ./gradlew assembleDebug --stacktrace
-
-      # 9. Verificar APK
-      - name: Verificar APK generado
-        id: apk
-        working-directory: ${{ steps.project.outputs.dir }}
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK=$(find app/build/outputs/apk/debug \
-            -maxdepth 1 \
-            -type f \
-            -name "*.apk" \
-            | head -n 1 || true)
-
-          if [ -z "$APK" ]; then
-            echo "::error::No se generó el APK."
+          if [ ! -f "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "::error::Falta gradle-wrapper.jar."
             exit 1
           fi
 
-          echo "path=$APK" >> "$GITHUB_OUTPUT"
-          ls -lh "$APK"
+          chmod +x "$PROJECT_DIR/gradlew"
 
-      # 10. Publicar APK descargable
-      - name: Publicar APK Nexora 2.0
+      - name: Configurar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Configurar Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Aceptar licencias del SDK
+        shell: bash
+        run: |
+          set -e
+          yes | sdkmanager --licenses || true
+
+      - name: Compilar APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Publicar APK
         uses: actions/upload-artifact@v4
         with:
-          name: Nexora-2.0-APK
-          path: ${{ steps.project.outputs.dir }}/${{ steps.apk.outputs.path }}
+          name: Nexora-APK
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
-          retention-days: 14
