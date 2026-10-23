@@ -9,7 +9,6 @@ on:
 
 permissions:
   contents: read
-  actions: write
 
 jobs:
   extract:
@@ -43,8 +42,7 @@ jobs:
           mapfile -d '' ZIPS < <(
             find "$GITHUB_WORKSPACE" \
               -type f -iname '*.zip' \
-              -not -path '*/.git/*' \
-              -print0
+              -not -path '*/.git/*' -print0
           )
 
           if [ "${#ZIPS[@]}" -eq 0 ]; then
@@ -65,18 +63,14 @@ jobs:
             if [ "${#ZIPS[@]}" -eq 1 ]; then
               ZIP="${ZIPS[0]}"
             else
-              echo "::error::Hay varios ZIP y ninguno se identifica como Nexora."
+              echo "::error::Hay varios ZIP y ninguno contiene Nexora en el nombre."
               printf '%s\n' "${ZIPS[@]}"
               exit 1
             fi
           fi
 
           echo "ZIP seleccionado: $ZIP"
-
-          echo "=== VALIDANDO ZIP ==="
           unzip -t "$ZIP"
-
-          echo "=== EXTRAYENDO PROYECTO ==="
           unzip -o "$ZIP" -d "$DESTINO"
 
           echo "EXTRACT_ROOT=$DESTINO" >> "$GITHUB_ENV"
@@ -85,63 +79,45 @@ jobs:
           find "$DESTINO" -maxdepth 5 -print \
             | sort | head -n 500
 
-      - name: Diagnosticar y validar proyecto
+      - name: Validar estructura Android
         shell: bash
         run: |
           set -euo pipefail
 
           ROOT="$EXTRACT_ROOT"
 
-          echo "=== ARCHIVOS GRADLE ==="
+          echo "=== ARCHIVOS DE CONFIGURACIÓN ==="
           find "$ROOT" -type f \( \
-            -name gradlew \
-            -o -name gradlew.bat \
-            -o -name settings.gradle \
+            -name settings.gradle \
             -o -name settings.gradle.kts \
-            -o -name gradle-wrapper.jar \
-            -o -name gradle-wrapper.properties \
+            -o -name build.gradle \
+            -o -name build.gradle.kts \
+            -o -name libs.versions.toml \
+            -o -name gradlew \
           \) -print | sort
 
-          echo "=== CARPETAS APP ==="
-          find "$ROOT" -type d -name app -print
+          SETTINGS="$(find "$ROOT" -type f \
+            \( -name settings.gradle \
+            -o -name settings.gradle.kts \) \
+            -print -quit)"
 
-          mapfile -t WRAPPERS < <(
-            find "$ROOT" -type f -name gradlew -print
-          )
-
-          if [ "${#WRAPPERS[@]}" -eq 0 ]; then
-            echo "::error::El ZIP no contiene gradlew."
-            echo "Comprueba el contenido del ZIP original."
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::No se encontró settings.gradle."
             exit 1
           fi
 
-          VALID_PROJECT=""
+          PROJECT_DIR="$(dirname "$SETTINGS")"
 
-          for WRAPPER in "${WRAPPERS[@]}"; do
-            DIR="$(dirname "$WRAPPER")"
-
-            if { [ -f "$DIR/settings.gradle" ] ||
-                 [ -f "$DIR/settings.gradle.kts" ]; } &&
-               [ -d "$DIR/app" ] &&
-               [ -f "$DIR/gradle/wrapper/gradle-wrapper.jar" ] &&
-               [ -f "$DIR/gradle/wrapper/gradle-wrapper.properties" ]; then
-              VALID_PROJECT="$DIR"
-              break
-            fi
-          done
-
-          if [ -z "$VALID_PROJECT" ]; then
-            echo "::error::No se encontró una raíz Android completa."
-            echo "Se necesita gradlew, settings.gradle, app y Gradle Wrapper."
+          if [ ! -d "$PROJECT_DIR/app" ]; then
+            echo "::error::No se encontró app junto a settings.gradle."
             exit 1
           fi
 
-          chmod +x "$VALID_PROJECT/gradlew"
+          echo "Proyecto detectado: $PROJECT_DIR"
+          echo "Se permite que el ZIP no incluya gradlew."
 
-          echo "=== PROYECTO VALIDADO ==="
-          echo "$VALID_PROJECT"
-
-          find "$VALID_PROJECT" -maxdepth 3 -type f \
+          echo "=== ARCHIVOS GRADLE DEL PROYECTO ==="
+          find "$PROJECT_DIR" -maxdepth 4 -type f \
             | sort | head -n 500
 
       - name: Preparar artefacto del proyecto
@@ -151,27 +127,20 @@ jobs:
 
           ROOT="$EXTRACT_ROOT"
 
-          mapfile -t WRAPPERS < <(
-            find "$ROOT" -type f -name gradlew -print
-          )
+          SETTINGS="$(find "$ROOT" -type f \
+            \( -name settings.gradle \
+            -o -name settings.gradle.kts \) \
+            -print -quit)"
 
-          PROJECT_DIR=""
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::No se encontró settings.gradle."
+            exit 1
+          fi
 
-          for WRAPPER in "${WRAPPERS[@]}"; do
-            DIR="$(dirname "$WRAPPER")"
+          PROJECT_DIR="$(dirname "$SETTINGS")"
 
-            if { [ -f "$DIR/settings.gradle" ] ||
-                 [ -f "$DIR/settings.gradle.kts" ]; } &&
-               [ -d "$DIR/app" ] &&
-               [ -f "$DIR/gradle/wrapper/gradle-wrapper.jar" ] &&
-               [ -f "$DIR/gradle/wrapper/gradle-wrapper.properties" ]; then
-              PROJECT_DIR="$DIR"
-              break
-            fi
-          done
-
-          if [ -z "$PROJECT_DIR" ]; then
-            echo "::error::No se pudo localizar el proyecto validado."
+          if [ ! -d "$PROJECT_DIR/app" ]; then
+            echo "::error::No se encontró el módulo app."
             exit 1
           fi
 
@@ -180,7 +149,7 @@ jobs:
 
           zip -qr "$RUNNER_TEMP/paquete/Nexora-extraido.zip" .
 
-          echo "Proyecto preparado para descargar como artefacto."
+          echo "Proyecto empaquetado correctamente."
 
       - name: Guardar proyecto extraído
         uses: actions/upload-artifact@v4
