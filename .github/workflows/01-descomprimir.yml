@@ -19,15 +19,32 @@ jobs:
       - name: Descargar repositorio
         uses: actions/checkout@v4
 
-      - name: Buscar ZIP
+      - name: Mostrar archivos del repositorio
         shell: bash
         run: |
           set -euo pipefail
 
+          echo "=== RAÍZ DEL REPOSITORIO ==="
+          ls -lah "$GITHUB_WORKSPACE"
+
+          echo "=== ARCHIVOS ZIP ==="
+          find "$GITHUB_WORKSPACE" \
+            -type f -iname '*.zip' \
+            -not -path '*/.git/*' -print
+
+      - name: Buscar y descomprimir ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          DESTINO="$RUNNER_TEMP/nexora"
+          mkdir -p "$DESTINO"
+
           mapfile -d '' ZIPS < <(
             find "$GITHUB_WORKSPACE" \
               -type f -iname '*.zip' \
-              -not -path '*/.git/*' -print0
+              -not -path '*/.git/*' \
+              -print0
           )
 
           if [ "${#ZIPS[@]}" -eq 0 ]; then
@@ -36,6 +53,7 @@ jobs:
           fi
 
           ZIP=""
+
           for FILE in "${ZIPS[@]}"; do
             if [[ "$(basename "$FILE")" =~ [Nn]exora ]]; then
               ZIP="$FILE"
@@ -47,65 +65,127 @@ jobs:
             if [ "${#ZIPS[@]}" -eq 1 ]; then
               ZIP="${ZIPS[0]}"
             else
-              printf '%s\n' "${ZIPS[@]}"
               echo "::error::Hay varios ZIP y ninguno se identifica como Nexora."
+              printf '%s\n' "${ZIPS[@]}"
               exit 1
             fi
           fi
 
           echo "ZIP seleccionado: $ZIP"
+
+          echo "=== VALIDANDO ZIP ==="
           unzip -t "$ZIP"
 
-          mkdir -p "$RUNNER_TEMP/nexora"
-          unzip -o "$ZIP" -d "$RUNNER_TEMP/nexora"
+          echo "=== EXTRAYENDO PROYECTO ==="
+          unzip -o "$ZIP" -d "$DESTINO"
 
-      - name: Validar proyecto
+          echo "EXTRACT_ROOT=$DESTINO" >> "$GITHUB_ENV"
+
+          echo "=== CONTENIDO EXTRAÍDO ==="
+          find "$DESTINO" -maxdepth 5 -print \
+            | sort | head -n 500
+
+      - name: Diagnosticar y validar proyecto
         shell: bash
         run: |
           set -euo pipefail
 
-          ROOT="$RUNNER_TEMP/nexora"
+          ROOT="$EXTRACT_ROOT"
 
-          SETTINGS="$(find "$ROOT" -type f \
-            \( -name settings.gradle \
-            -o -name settings.gradle.kts \) \
-            -print -quit)"
+          echo "=== ARCHIVOS GRADLE ==="
+          find "$ROOT" -type f \( \
+            -name gradlew \
+            -o -name gradlew.bat \
+            -o -name settings.gradle \
+            -o -name settings.gradle.kts \
+            -o -name gradle-wrapper.jar \
+            -o -name gradle-wrapper.properties \
+          \) -print | sort
 
-          if [ -z "$SETTINGS" ]; then
-            echo "::error::No se encontró settings.gradle."
+          echo "=== CARPETAS APP ==="
+          find "$ROOT" -type d -name app -print
+
+          mapfile -t WRAPPERS < <(
+            find "$ROOT" -type f -name gradlew -print
+          )
+
+          if [ "${#WRAPPERS[@]}" -eq 0 ]; then
+            echo "::error::El ZIP no contiene gradlew."
+            echo "Comprueba el contenido del ZIP original."
             exit 1
           fi
 
-          PROJECT_DIR="$(dirname "$SETTINGS")"
+          VALID_PROJECT=""
 
-          if [ ! -f "$PROJECT_DIR/gradlew" ]; then
-            echo "::error::Falta gradlew."
+          for WRAPPER in "${WRAPPERS[@]}"; do
+            DIR="$(dirname "$WRAPPER")"
+
+            if { [ -f "$DIR/settings.gradle" ] ||
+                 [ -f "$DIR/settings.gradle.kts" ]; } &&
+               [ -d "$DIR/app" ] &&
+               [ -f "$DIR/gradle/wrapper/gradle-wrapper.jar" ] &&
+               [ -f "$DIR/gradle/wrapper/gradle-wrapper.properties" ]; then
+              VALID_PROJECT="$DIR"
+              break
+            fi
+          done
+
+          if [ -z "$VALID_PROJECT" ]; then
+            echo "::error::No se encontró una raíz Android completa."
+            echo "Se necesita gradlew, settings.gradle, app y Gradle Wrapper."
             exit 1
           fi
 
-          if [ ! -d "$PROJECT_DIR/app" ]; then
-            echo "::error::No se encontró el módulo app."
-            exit 1
-          fi
+          chmod +x "$VALID_PROJECT/gradlew"
 
-          chmod +x "$PROJECT_DIR/gradlew"
+          echo "=== PROYECTO VALIDADO ==="
+          echo "$VALID_PROJECT"
 
-          echo "Proyecto validado: $PROJECT_DIR"
-          find "$PROJECT_DIR" -maxdepth 3 -type f \
-            | sort | head -n 300
+          find "$VALID_PROJECT" -maxdepth 3 -type f \
+            | sort | head -n 500
 
-      - name: Empaquetar proyecto extraído
+      - name: Preparar artefacto del proyecto
         shell: bash
         run: |
           set -euo pipefail
-          cd "$RUNNER_TEMP/nexora"
-          zip -qr "$RUNNER_TEMP/Nexora-extraido.zip" .
+
+          ROOT="$EXTRACT_ROOT"
+
+          mapfile -t WRAPPERS < <(
+            find "$ROOT" -type f -name gradlew -print
+          )
+
+          PROJECT_DIR=""
+
+          for WRAPPER in "${WRAPPERS[@]}"; do
+            DIR="$(dirname "$WRAPPER")"
+
+            if { [ -f "$DIR/settings.gradle" ] ||
+                 [ -f "$DIR/settings.gradle.kts" ]; } &&
+               [ -d "$DIR/app" ] &&
+               [ -f "$DIR/gradle/wrapper/gradle-wrapper.jar" ] &&
+               [ -f "$DIR/gradle/wrapper/gradle-wrapper.properties" ]; then
+              PROJECT_DIR="$DIR"
+              break
+            fi
+          done
+
+          if [ -z "$PROJECT_DIR" ]; then
+            echo "::error::No se pudo localizar el proyecto validado."
+            exit 1
+          fi
+
+          mkdir -p "$RUNNER_TEMP/paquete"
+          cd "$PROJECT_DIR"
+
+          zip -qr "$RUNNER_TEMP/paquete/Nexora-extraido.zip" .
+
+          echo "Proyecto preparado para descargar como artefacto."
 
       - name: Guardar proyecto extraído
         uses: actions/upload-artifact@v4
         with:
           name: Nexora-proyecto-extraido
-          path: ${{ runner.temp }}/Nexora-extraido.zip
+          path: ${{ runner.temp }}/paquete/Nexora-extraido.zip
           if-no-files-found: error
           retention-days: 7
-          
