@@ -1,5 +1,5 @@
 
-name: Descomprimir Nexora 2.0
+name: Nexora 2.0 - Descomprimir y compilar APK
 
 on:
   workflow_dispatch:
@@ -11,27 +11,25 @@ permissions:
   contents: read
 
 jobs:
-  descomprimir:
+  build:
     runs-on: ubuntu-latest
 
     steps:
       - name: Descargar repositorio
         uses: actions/checkout@v4
 
-      - name: Mostrar archivos disponibles
+      - name: Mostrar archivos del repositorio
         shell: bash
         run: |
           set -euo pipefail
-
-          echo "Contenido de la raíz:"
+          echo "=== RAÍZ DEL REPOSITORIO ==="
           ls -la
-
-          echo "Buscando archivos ZIP:"
+          echo "=== ARCHIVOS ZIP ==="
           find "$GITHUB_WORKSPACE" \
             -type f -iname '*.zip' \
             -not -path '*/.git/*' -print
 
-      - name: Encontrar y descomprimir ZIP
+      - name: Buscar y descomprimir ZIP
         shell: bash
         run: |
           set -euo pipefail
@@ -44,12 +42,10 @@ jobs:
           )
 
           if [ "${#ZIP_FILES[@]}" -eq 0 ]; then
-            echo "::error::No hay archivos ZIP en el repositorio."
-            echo "Debes subir el ZIP a GitHub y guardar los cambios."
+            echo "::error::No se encontró ningún ZIP en el repositorio."
+            echo "Sube el ZIP a GitHub y guarda los cambios."
             exit 1
           fi
-
-          echo "ZIP encontrados: ${#ZIP_FILES[@]}"
 
           ZIP_FILE=""
 
@@ -64,36 +60,44 @@ jobs:
             if [ "${#ZIP_FILES[@]}" -eq 1 ]; then
               ZIP_FILE="${ZIP_FILES[0]}"
             else
-              echo "::error::Hay varios ZIP y ninguno tiene Nexora en su nombre."
+              echo "::error::Hay varios ZIP y ninguno contiene Nexora en su nombre."
               printf '%s\n' "${ZIP_FILES[@]}"
-              echo "Renombra el ZIP correcto para incluir Nexora."
               exit 1
             fi
           fi
 
-          echo "Archivo seleccionado: $ZIP_FILE"
+          echo "ZIP seleccionado: $ZIP_FILE"
 
-          echo "Verificando el archivo..."
           unzip -t "$ZIP_FILE"
 
-          DESTINO="$GITHUB_WORKSPACE/proyecto"
+          DESTINO="$RUNNER_TEMP/nexora_extraido"
           mkdir -p "$DESTINO"
 
-          echo "Descomprimiendo..."
           unzip -o "$ZIP_FILE" -d "$DESTINO"
 
-          echo "Archivos extraídos:"
-          find "$DESTINO" -maxdepth 5 -type f \
-            | sort | head -n 300
+          echo "EXTRACT_ROOT=$DESTINO" >> "$GITHUB_ENV"
 
-          echo "DESCOMPRESION_OK=true" >> "$GITHUB_ENV"
+          echo "=== CONTENIDO EXTRAÍDO ==="
+          find "$DESTINO" -maxdepth 6 -type f \
+            | sort | head -n 500
 
-      - name: Comprobar proyecto Android
+      - name: Diagnosticar estructura del proyecto
         shell: bash
         run: |
           set -euo pipefail
 
-          ROOT="$GITHUB_WORKSPACE/proyecto"
+          ROOT="$EXTRACT_ROOT"
+
+          echo "=== ARCHIVOS GRADLE ==="
+          find "$ROOT" -type f \( \
+            -name gradlew -o \
+            -name gradlew.bat -o \
+            -name gradle-wrapper.jar -o \
+            -name settings.gradle -o \
+            -name settings.gradle.kts -o \
+            -name build.gradle -o \
+            -name build.gradle.kts \
+          \) -print
 
           SETTINGS="$(find "$ROOT" -type f \
             \( -name settings.gradle \
@@ -101,23 +105,81 @@ jobs:
             -print -quit)"
 
           if [ -z "$SETTINGS" ]; then
-            echo "::error::ZIP extraído, pero no contiene settings.gradle(.kts)."
-            echo "Revisa si el ZIP contiene el proyecto Android correcto."
+            echo "::error::El ZIP no contiene settings.gradle ni settings.gradle.kts."
             exit 1
           fi
 
           PROJECT_DIR="$(dirname "$SETTINGS")"
 
-          echo "Proyecto localizado: $PROJECT_DIR"
+          echo "Proyecto detectado: $PROJECT_DIR"
 
           if [ ! -d "$PROJECT_DIR/app" ]; then
-            echo "::error::Falta la carpeta app."
+            echo "::error::No se encontró el módulo app."
             exit 1
           fi
 
           if [ ! -f "$PROJECT_DIR/gradlew" ]; then
-            echo "::error::Falta gradlew."
+            echo "::error::Falta gradlew. El ZIP no contiene el Gradle Wrapper."
+            echo "Consulta la lista de archivos mostrada en el paso anterior."
             exit 1
           fi
 
-          echo "El proyecto Android tiene los archivos básicos."
+          if [ ! -f "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "::error::Falta gradle/wrapper/gradle-wrapper.jar."
+            exit 1
+          fi
+
+          chmod +x "$PROJECT_DIR/gradlew"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Estructura básica comprobada."
+
+      - name: Configurar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Configurar Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Configurar Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Aceptar licencias del SDK
+        shell: bash
+        run: |
+          set -e
+          set +o pipefail
+          yes | sdkmanager --licenses || true
+
+      - name: Compilar APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon assembleDebug --stacktrace
+
+      - name: Verificar APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="$(find "$PROJECT_DIR/app/build/outputs/apk" \
+            -type f -name '*.apk' -print -quit)"
+
+          if [ -z "$APK" ]; then
+            echo "::error::No se encontró ningún APK generado."
+            exit 1
+          fi
+
+          echo "APK generado correctamente:"
+          ls -lh "$APK"
+
+      - name: Publicar APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nexora-APK
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 7
