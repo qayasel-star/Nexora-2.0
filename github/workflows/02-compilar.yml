@@ -1,0 +1,226 @@
+
+name: Nexora 2.0 - Compilar APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar proyecto extraído
+        uses: actions/download-artifact@v4
+        with:
+          name: Nexora-proyecto-extraido
+          path: ${{ runner.temp }}/entrada
+          # Descarga el artefacto de la ejecución que selecciones
+          # desde la interfaz de GitHub Actions.
+
+      - name: Extraer proyecto
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ZIP="$RUNNER_TEMP/entrada/Nexora-extraido.zip"
+          DESTINO="$RUNNER_TEMP/nexora_proyecto"
+
+          if [ ! -f "$ZIP" ]; then
+            echo "::error::No se encontró Nexora-extraido.zip."
+            exit 1
+          fi
+
+          unzip -t "$ZIP"
+          mkdir -p "$DESTINO"
+          unzip -oq "$ZIP" -d "$DESTINO"
+
+          SETTINGS="$(find "$DESTINO" -type f \
+            \( -name settings.gradle \
+            -o -name settings.gradle.kts \) \
+            -print -quit)"
+
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::No se encontró settings.gradle."
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$SETTINGS")"
+
+          if [ ! -d "$PROJECT_DIR/app" ]; then
+            echo "::error::No se encontró el módulo app."
+            exit 1
+          fi
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+      - name: Configurar Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Detectar versión de Android Gradle Plugin
+        id: versions
+        working-directory: ${{ runner.temp }}/nexora_proyecto
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT_DIR="$RUNNER_TEMP/nexora_proyecto"
+
+          echo "=== VERSIONES Y CONFIGURACIÓN ==="
+
+          find "$PROJECT_DIR" -maxdepth 4 -type f \( \
+            -name settings.gradle.kts \
+            -o -name build.gradle.kts \
+            -o -name build.gradle \
+            -o -name libs.versions.toml \
+          \) -print
+
+          # Busca versiones explícitas del plugin de Android.
+          AGP="$(
+            grep -RhoE \
+              'com\.android\.application[^[:cntrl:]]{0,100}version[[:space:]]*["'\''][0-9][^"'\'']*' \
+              "$PROJECT_DIR" \
+              --include='*.gradle' \
+              --include='*.gradle.kts' \
+              --include='*.toml' 2>/dev/null \
+            | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' \
+            | head -n 1 || true
+          )"
+
+          if [ -z "$AGP" ]; then
+            echo "::error::No se pudo detectar la versión del plugin de Android."
+            echo "Hay que revisar build.gradle.kts y gradle/libs.versions.toml."
+            exit 1
+          fi
+
+          echo "AGP=$AGP" >> "$GITHUB_OUTPUT"
+          echo "Plugin Android detectado: $AGP"
+
+      - name: Seleccionar Gradle compatible
+        id: gradle_version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          AGP="${{ steps.versions.outputs.AGP }}"
+
+          # Compatibilidad orientativa para versiones comunes de AGP.
+          # Las versiones especiales deben verificarse con el proyecto.
+          case "$AGP" in
+            8.0*|8.1*)
+              GRADLE_VERSION="8.0"
+              ;;
+            8.2*)
+              GRADLE_VERSION="8.2"
+              ;;
+            8.3*)
+              GRADLE_VERSION="8.4"
+              ;;
+            8.4*)
+              GRADLE_VERSION="8.6"
+              ;;
+            8.5*)
+              GRADLE_VERSION="8.7"
+              ;;
+            8.6*)
+              GRADLE_VERSION="8.7"
+              ;;
+            8.7*)
+              GRADLE_VERSION="8.9"
+              ;;
+            8.8*)
+              GRADLE_VERSION="8.10.2"
+              ;;
+            8.9*)
+              GRADLE_VERSION="8.11.1"
+              ;;
+            8.10*)
+              GRADLE_VERSION="8.11.1"
+              ;;
+            8.11*)
+              GRADLE_VERSION="8.13"
+              ;;
+            8.12*)
+              GRADLE_VERSION="8.13"
+              ;;
+            8.13*)
+              GRADLE_VERSION="8.13"
+              ;;
+            8.14*)
+              GRADLE_VERSION="8.14.3"
+              ;;
+            9.*)
+              echo "::error::AGP 9.x requiere verificar la compatibilidad del proyecto."
+              exit 1
+              ;;
+            *)
+              echo "::error::AGP $AGP no está contemplado en este selector."
+              echo "Debe verificarse la compatibilidad antes de elegir Gradle."
+              exit 1
+              ;;
+          esac
+
+          echo "VERSION=$GRADLE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "Gradle seleccionado: $GRADLE_VERSION"
+
+      - name: Configurar Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: ${{ steps.gradle_version.outputs.VERSION }}
+
+      - name: Configurar Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Aceptar licencias Android
+        shell: bash
+        run: |
+          set +o pipefail
+          yes | sdkmanager --licenses || true
+
+      - name: Compilar APK
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          gradle --no-daemon assembleDebug --stacktrace
+
+      - name: Verificar APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK_DIR="$PROJECT_DIR/app/build/outputs/apk"
+
+          if [ ! -d "$APK_DIR" ]; then
+            echo "::error::No se generó la carpeta de APK."
+            exit 1
+          fi
+
+          mapfile -t APKS < <(
+            find "$APK_DIR" -type f -name '*.apk' -print
+          )
+
+          if [ "${#APKS[@]}" -eq 0 ]; then
+            echo "::error::No se encontró ninguna APK."
+            exit 1
+          fi
+
+          for APK in "${APKS[@]}"; do
+            ls -lh "$APK"
+          done
+
+      - name: Publicar APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nexora-APK
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 7
+          
