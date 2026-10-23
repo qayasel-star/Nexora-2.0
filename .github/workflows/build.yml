@@ -1,5 +1,5 @@
 
-name: Build Nexora APK
+name: Preparar Nexora 2.0
 
 on:
   workflow_dispatch:
@@ -11,118 +11,53 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  preparar:
     runs-on: ubuntu-latest
 
     steps:
       - name: Descargar repositorio
         uses: actions/checkout@v4
 
-      - name: Mostrar archivos del repositorio
-        shell: bash
-        run: |
-          set -e
-          echo "Directorio actual:"
-          pwd
-          echo "Archivos encontrados:"
-          find . -maxdepth 4 -type f \
-            -not -path './.git/*' | sort | head -n 300
-
-      - name: Buscar y descomprimir ZIP
+      - name: Localizar y descomprimir ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          mkdir -p "$RUNNER_TEMP/nexora_extraido"
+          echo "Buscando archivos ZIP..."
 
-          ZIP_FILE="$(find "$GITHUB_WORKSPACE" \
-            -type f -iname '*.zip' \
-            -not -path '*/.git/*' \
-            -print -quit)"
+          find . -type f -iname "*.zip" \
+            -not -path "./.git/*" -print
+
+          ZIP_FILE="$(find . -type f -iname "*.zip" \
+            -not -path "./.git/*" -print -quit)"
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "::error::No se encontró ningún archivo ZIP en el repositorio."
-            echo "Sube el ZIP de Nexora a la rama main y vuelve a ejecutar."
+            echo "::error::No se encontró el ZIP en el repositorio."
             exit 1
           fi
 
-          echo "ZIP encontrado: $ZIP_FILE"
+          echo "Archivo encontrado: $ZIP_FILE"
 
+          echo "Verificando integridad del ZIP..."
           unzip -t "$ZIP_FILE"
 
-          unzip -o "$ZIP_FILE" \
-            -d "$RUNNER_TEMP/nexora_extraido"
+          mkdir -p proyecto
+
+          echo "Descomprimiendo Nexora..."
+          unzip -o "$ZIP_FILE" -d proyecto
 
           echo "Contenido descomprimido:"
-          find "$RUNNER_TEMP/nexora_extraido" \
-            -maxdepth 5 -type f | sort | head -n 300
+          find proyecto -maxdepth 5 -type f \
+            | sort | head -n 300
 
-      - name: Localizar proyecto Android
-        shell: bash
-        run: |
-          set -euo pipefail
+          echo "Comprobando archivos Gradle..."
 
-          ROOT="$RUNNER_TEMP/nexora_extraido"
-
-          SETTINGS="$(find "$ROOT" -type f \
+          if find proyecto -type f \
             \( -name settings.gradle \
             -o -name settings.gradle.kts \) \
-            -print -quit)"
-
-          if [ -z "$SETTINGS" ]; then
+            -print -quit | grep -q .; then
+            echo "Correcto: se encontró la configuración del proyecto."
+          else
             echo "::error::El ZIP no contiene settings.gradle ni settings.gradle.kts."
-            echo "Comprueba que subiste el proyecto Android completo."
             exit 1
           fi
-
-          PROJECT_DIR="$(dirname "$SETTINGS")"
-
-          echo "Proyecto Android: $PROJECT_DIR"
-          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
-
-          if [ ! -f "$PROJECT_DIR/gradlew" ]; then
-            echo "::error::El proyecto no contiene gradlew."
-            echo "El ZIP debe incluir el Gradle Wrapper."
-            exit 1
-          fi
-
-          if [ ! -d "$PROJECT_DIR/app" ]; then
-            echo "::error::No se encontró el módulo app."
-            exit 1
-          fi
-
-          if [ ! -f "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.jar" ]; then
-            echo "::error::Falta gradle-wrapper.jar."
-            exit 1
-          fi
-
-          chmod +x "$PROJECT_DIR/gradlew"
-
-      - name: Configurar Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '17'
-
-      - name: Configurar Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Aceptar licencias del SDK
-        shell: bash
-        run: |
-          set -e
-          yes | sdkmanager --licenses || true
-
-      - name: Compilar APK
-        working-directory: ${{ env.PROJECT_DIR }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          ./gradlew assembleDebug --stacktrace
-
-      - name: Publicar APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: Nexora-APK
-          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/*.apk
-          if-no-files-found: error
