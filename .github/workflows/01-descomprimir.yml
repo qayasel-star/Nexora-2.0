@@ -1,0 +1,111 @@
+
+name: Nexora 2.0 - Descomprimir proyecto
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  extract:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Buscar ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -d '' ZIPS < <(
+            find "$GITHUB_WORKSPACE" \
+              -type f -iname '*.zip' \
+              -not -path '*/.git/*' -print0
+          )
+
+          if [ "${#ZIPS[@]}" -eq 0 ]; then
+            echo "::error::No se encontró ningún ZIP."
+            exit 1
+          fi
+
+          ZIP=""
+          for FILE in "${ZIPS[@]}"; do
+            if [[ "$(basename "$FILE")" =~ [Nn]exora ]]; then
+              ZIP="$FILE"
+              break
+            fi
+          done
+
+          if [ -z "$ZIP" ]; then
+            if [ "${#ZIPS[@]}" -eq 1 ]; then
+              ZIP="${ZIPS[0]}"
+            else
+              printf '%s\n' "${ZIPS[@]}"
+              echo "::error::Hay varios ZIP y ninguno se identifica como Nexora."
+              exit 1
+            fi
+          fi
+
+          echo "ZIP seleccionado: $ZIP"
+          unzip -t "$ZIP"
+
+          mkdir -p "$RUNNER_TEMP/nexora"
+          unzip -o "$ZIP" -d "$RUNNER_TEMP/nexora"
+
+      - name: Validar proyecto
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          ROOT="$RUNNER_TEMP/nexora"
+
+          SETTINGS="$(find "$ROOT" -type f \
+            \( -name settings.gradle \
+            -o -name settings.gradle.kts \) \
+            -print -quit)"
+
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::No se encontró settings.gradle."
+            exit 1
+          fi
+
+          PROJECT_DIR="$(dirname "$SETTINGS")"
+
+          if [ ! -f "$PROJECT_DIR/gradlew" ]; then
+            echo "::error::Falta gradlew."
+            exit 1
+          fi
+
+          if [ ! -d "$PROJECT_DIR/app" ]; then
+            echo "::error::No se encontró el módulo app."
+            exit 1
+          fi
+
+          chmod +x "$PROJECT_DIR/gradlew"
+
+          echo "Proyecto validado: $PROJECT_DIR"
+          find "$PROJECT_DIR" -maxdepth 3 -type f \
+            | sort | head -n 300
+
+      - name: Empaquetar proyecto extraído
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/nexora"
+          zip -qr "$RUNNER_TEMP/Nexora-extraido.zip" .
+
+      - name: Guardar proyecto extraído
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nexora-proyecto-extraido
+          path: ${{ runner.temp }}/Nexora-extraido.zip
+          if-no-files-found: error
+          retention-days: 7
+          
