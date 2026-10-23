@@ -17,8 +17,8 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      # 1. Descargar el código fuente
-      - name: Descargar repositorio
+      # 1. Descargar el repositorio
+      - name: Descargar código fuente
         uses: actions/checkout@v4
 
       # 2. Configurar Java
@@ -32,22 +32,41 @@ jobs:
       - name: Configurar Android SDK
         uses: android-actions/setup-android@v3
         with:
-          packages: ''
+          packages: platform-tools
 
-      # 4. Aceptar las licencias Android
-      - name: Aceptar licencias del SDK
+      # 4. Aceptar licencias sin utilizar yes | sdkmanager
+      - name: Aceptar licencias Android
         shell: bash
         run: |
-          set -e
-          yes | sdkmanager --licenses
-          echo "Licencias Android procesadas."
+          set -euo pipefail
 
-      # 5. Buscar el proyecto Android
+          SDKMANAGER="${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" \
+              -type f -name sdkmanager | sort -V | tail -n 1)
+          fi
+
+          if [ ! -x "$SDKMANAGER" ]; then
+            echo "::error::No se encontró sdkmanager."
+            exit 1
+          fi
+
+          # El proceso de setup-android normalmente gestiona
+          # las licencias necesarias. Este comando comprueba
+          # su estado sin crear una tubería que provoque Broken pipe.
+          if ! "$SDKMANAGER" --licenses < /dev/null; then
+            echo "::error::Hay licencias pendientes de aceptar."
+            echo "Revisa la configuración del Android SDK."
+            exit 1
+          fi
+
+      # 5. Localizar el proyecto Android
       - name: Localizar proyecto Android
         id: project
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
 
           if [ -f "./gradlew" ]; then
             PROJECT_DIR="."
@@ -57,11 +76,11 @@ jobs:
               -name gradlew \
               -not -path "*/.gradle/*" \
               -not -path "*/build/*" \
-              | head -n 1)
+              | head -n 1 || true)
 
             if [ -z "$GRADLEW" ]; then
               echo "::error::No se encontró gradlew."
-              echo "El repositorio debe contener un proyecto Android completo."
+              echo "Sube el proyecto Android completo al repositorio."
               exit 1
             fi
 
@@ -82,43 +101,45 @@ jobs:
           echo "dir=$PROJECT_DIR" >> "$GITHUB_OUTPUT"
           echo "Proyecto localizado en: $PROJECT_DIR"
 
-      # 6. Preparar Gradle
+      # 6. Configurar Gradle
       - name: Configurar Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      # 7. Dar permisos al compilador
-      - name: Preparar Gradle Wrapper
+      # 7. Preparar Gradle Wrapper
+      - name: Preparar compilador Gradle
         working-directory: ${{ steps.project.outputs.dir }}
         shell: bash
         run: chmod +x ./gradlew
 
-      # 8. Compilar la aplicación
-      - name: Compilar APK Debug
+      # 8. Compilar APK
+      - name: Compilar Nexora Debug
         working-directory: ${{ steps.project.outputs.dir }}
         shell: bash
         run: |
           set -o pipefail
           ./gradlew assembleDebug --stacktrace
 
-      # 9. Verificar que se haya generado el APK
-      - name: Verificar APK
+      # 9. Verificar APK
+      - name: Verificar APK generado
         id: apk
         working-directory: ${{ steps.project.outputs.dir }}
         shell: bash
         run: |
+          set -euo pipefail
+
           APK=$(find app/build/outputs/apk/debug \
             -maxdepth 1 \
             -type f \
             -name "*.apk" \
-            | head -n 1)
+            | head -n 1 || true)
 
           if [ -z "$APK" ]; then
-            echo "::error::La compilación terminó sin generar un APK."
+            echo "::error::No se generó el APK."
             exit 1
           fi
 
           echo "path=$APK" >> "$GITHUB_OUTPUT"
-          echo "APK generado: $APK"
+          ls -lh "$APK"
 
       # 10. Publicar APK descargable
       - name: Publicar APK Nexora 2.0
