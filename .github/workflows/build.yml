@@ -18,61 +18,77 @@ jobs:
       - name: Descargar repositorio
         uses: actions/checkout@v4
 
-      - name: Instalar herramienta ZIP
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y unzip
-
-      - name: Buscar ZIP de Nexora
+      - name: Mostrar archivos disponibles
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Buscando el ZIP de Nexora..."
+          echo "Contenido de la raíz:"
+          ls -la
 
-          ZIP_FILE=""
+          echo "Buscando archivos ZIP:"
+          find "$GITHUB_WORKSPACE" \
+            -type f -iname '*.zip' \
+            -not -path '*/.git/*' -print
 
-          while IFS= read -r -d '' FILE; do
-            if [[ "$(basename "$FILE")" == \
-              "Nexora_Beta14_Sin_Menu_Lateral.zip" ]]; then
-              ZIP_FILE="$FILE"
-              break
-            fi
-          done < <(
+      - name: Encontrar y descomprimir ZIP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mapfile -d '' ZIP_FILES < <(
             find "$GITHUB_WORKSPACE" \
               -type f -iname '*.zip' \
-              -not -path '*/.git/*' -print0
+              -not -path '*/.git/*' \
+              -print0
           )
 
-          if [ -z "$ZIP_FILE" ]; then
-            echo "::error::No se encontró Nexora_Beta14_Sin_Menu_Lateral.zip."
-            echo "Sube el archivo ZIP a la raíz del repositorio."
+          if [ "${#ZIP_FILES[@]}" -eq 0 ]; then
+            echo "::error::No hay archivos ZIP en el repositorio."
+            echo "Debes subir el ZIP a GitHub y guardar los cambios."
             exit 1
           fi
 
-          echo "ZIP encontrado: $ZIP_FILE"
-          echo "ZIP_FILE=$ZIP_FILE" >> "$GITHUB_ENV"
+          echo "ZIP encontrados: ${#ZIP_FILES[@]}"
 
-      - name: Verificar integridad del ZIP
-        run: |
-          set -euo pipefail
+          ZIP_FILE=""
+
+          for FILE in "${ZIP_FILES[@]}"; do
+            if [[ "$(basename "$FILE")" == *Nexora* ]]; then
+              ZIP_FILE="$FILE"
+              break
+            fi
+          done
+
+          if [ -z "$ZIP_FILE" ]; then
+            if [ "${#ZIP_FILES[@]}" -eq 1 ]; then
+              ZIP_FILE="${ZIP_FILES[0]}"
+            else
+              echo "::error::Hay varios ZIP y ninguno tiene Nexora en su nombre."
+              printf '%s\n' "${ZIP_FILES[@]}"
+              echo "Renombra el ZIP correcto para incluir Nexora."
+              exit 1
+            fi
+          fi
+
+          echo "Archivo seleccionado: $ZIP_FILE"
+
+          echo "Verificando el archivo..."
           unzip -t "$ZIP_FILE"
-
-      - name: Descomprimir proyecto
-        shell: bash
-        run: |
-          set -euo pipefail
 
           DESTINO="$GITHUB_WORKSPACE/proyecto"
           mkdir -p "$DESTINO"
 
+          echo "Descomprimiendo..."
           unzip -o "$ZIP_FILE" -d "$DESTINO"
 
           echo "Archivos extraídos:"
           find "$DESTINO" -maxdepth 5 -type f \
             | sort | head -n 300
 
-      - name: Comprobar estructura Android
+          echo "DESCOMPRESION_OK=true" >> "$GITHUB_ENV"
+
+      - name: Comprobar proyecto Android
         shell: bash
         run: |
           set -euo pipefail
@@ -85,23 +101,23 @@ jobs:
             -print -quit)"
 
           if [ -z "$SETTINGS" ]; then
-            echo "::error::No se encontró settings.gradle ni settings.gradle.kts."
-            echo "Comprueba que el ZIP contenga el proyecto Android completo."
+            echo "::error::ZIP extraído, pero no contiene settings.gradle(.kts)."
+            echo "Revisa si el ZIP contiene el proyecto Android correcto."
             exit 1
           fi
 
           PROJECT_DIR="$(dirname "$SETTINGS")"
 
-          echo "Proyecto Android localizado en: $PROJECT_DIR"
+          echo "Proyecto localizado: $PROJECT_DIR"
 
           if [ ! -d "$PROJECT_DIR/app" ]; then
-            echo "::error::No se encontró el módulo app."
+            echo "::error::Falta la carpeta app."
             exit 1
           fi
 
           if [ ! -f "$PROJECT_DIR/gradlew" ]; then
-            echo "::error::Falta el archivo gradlew."
+            echo "::error::Falta gradlew."
             exit 1
           fi
 
-          echo "Verificación de estructura completada."
+          echo "El proyecto Android tiene los archivos básicos."
