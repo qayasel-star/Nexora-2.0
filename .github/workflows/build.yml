@@ -1,5 +1,5 @@
 
-name: Preparar Nexora 2.0
+name: Compilar Nexora APK
 
 on:
   workflow_dispatch:
@@ -11,53 +11,114 @@ permissions:
   contents: read
 
 jobs:
-  preparar:
+  build:
     runs-on: ubuntu-latest
 
     steps:
       - name: Descargar repositorio
         uses: actions/checkout@v4
 
-      - name: Localizar y descomprimir ZIP
+      - name: Configurar Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Buscar y descomprimir ZIP
         shell: bash
         run: |
           set -euo pipefail
 
-          echo "Buscando archivos ZIP..."
-
-          find . -type f -iname "*.zip" \
-            -not -path "./.git/*" -print
-
-          ZIP_FILE="$(find . -type f -iname "*.zip" \
-            -not -path "./.git/*" -print -quit)"
+          ZIP_FILE="$(find . -type f -iname '*.zip' \
+            -not -path './.git/*' -print -quit)"
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "::error::No se encontró el ZIP en el repositorio."
+            echo "::error::No se encontró el ZIP de Nexora."
             exit 1
           fi
 
-          echo "Archivo encontrado: $ZIP_FILE"
-
-          echo "Verificando integridad del ZIP..."
+          echo "ZIP encontrado: $ZIP_FILE"
           unzip -t "$ZIP_FILE"
 
-          mkdir -p proyecto
+          mkdir -p "$RUNNER_TEMP/nexora"
 
-          echo "Descomprimiendo Nexora..."
-          unzip -o "$ZIP_FILE" -d proyecto
+          unzip -o "$ZIP_FILE" \
+            -d "$RUNNER_TEMP/nexora"
 
-          echo "Contenido descomprimido:"
-          find proyecto -maxdepth 5 -type f \
-            | sort | head -n 300
-
-          echo "Comprobando archivos Gradle..."
-
-          if find proyecto -type f \
+          SETTINGS="$(find "$RUNNER_TEMP/nexora" \
+            -type f \
             \( -name settings.gradle \
             -o -name settings.gradle.kts \) \
-            -print -quit | grep -q .; then
-            echo "Correcto: se encontró la configuración del proyecto."
-          else
-            echo "::error::El ZIP no contiene settings.gradle ni settings.gradle.kts."
+            -print -quit)"
+
+          if [ -z "$SETTINGS" ]; then
+            echo "::error::El ZIP no contiene settings.gradle(.kts)."
             exit 1
           fi
+
+          PROJECT_DIR="$(dirname "$SETTINGS")"
+
+          if [ ! -f "$PROJECT_DIR/gradlew" ]; then
+            echo "::error::Falta gradlew en el proyecto extraído."
+            exit 1
+          fi
+
+          if [ ! -f "$PROJECT_DIR/gradle/wrapper/gradle-wrapper.jar" ]; then
+            echo "::error::Falta gradle-wrapper.jar."
+            exit 1
+          fi
+
+          if [ ! -d "$PROJECT_DIR/app" ]; then
+            echo "::error::No existe el módulo app."
+            exit 1
+          fi
+
+          chmod +x "$PROJECT_DIR/gradlew"
+
+          echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+
+          echo "Proyecto localizado: $PROJECT_DIR"
+
+      - name: Configurar Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Configurar Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Aceptar licencias Android
+        shell: bash
+        run: |
+          set -euo pipefail
+          set +o pipefail
+          yes | sdkmanager --licenses || true
+
+      - name: Compilar APK Debug
+        working-directory: ${{ env.PROJECT_DIR }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon assembleDebug --stacktrace
+
+      - name: Verificar APK generado
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          APK="$(find "$PROJECT_DIR/app/build/outputs/apk" \
+            -type f -name '*.apk' -print -quit)"
+
+          if [ -z "$APK" ]; then
+            echo "::error::La compilación terminó sin generar un APK."
+            exit 1
+          fi
+
+          echo "APK generado: $APK"
+          ls -lh "$APK"
+
+      - name: Descargar APK compilado
+        uses: actions/upload-artifact@v4
+        with:
+          name: Nexora-APK
+          path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/**/*.apk
+          if-no-files-found: error
+          retention-days: 7
